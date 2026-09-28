@@ -24,16 +24,16 @@ void expect(bool condition, const std::string& message)
 
 int main()
 {
-    std::vector<std::uint8_t> rom(20, 0x00);
+    std::vector<std::uint8_t> rom(24, 0x00);
     rom[0] = 0x41;
     rom[1] = 0x42;
     rom[2] = 0x04;
     rom[3] = 0x40;
     rom[4] = 0xC3;
-    rom[5] = 0x0A;
+    rom[5] = 0x10;
     rom[6] = 0x40;
-    rom[10] = 0x00;
-    rom[11] = 0xC9;
+    rom[16] = 0x00;
+    rom[17] = 0xC9;
 
     const auto analysis = msxdisa::analyze_rom(rom, msxdisa::MapperType::None, {}, {});
     expect(analysis.has_header, "AB header was not detected");
@@ -48,9 +48,9 @@ int main()
     expect(bank.states[3].kind == msxdisa::ByteKind::WordHigh, "INIT high byte should be word data");
     expect(bank.states[4].kind == msxdisa::ByteKind::Instruction, "INIT target should override header data");
     expect(bank.states[4].has_label, "entry point should be labeled");
-    expect(bank.states[10].kind == msxdisa::ByteKind::Instruction, "JP target should be explored");
-    expect(bank.states[10].has_label, "JP target should have a label");
-    expect(bank.states[11].kind == msxdisa::ByteKind::Instruction, "fallthrough should continue through NOP to RET");
+    expect(bank.states[16].kind == msxdisa::ByteKind::Instruction, "JP target should be explored");
+    expect(bank.states[16].has_label, "JP target should have a label");
+    expect(bank.states[17].kind == msxdisa::ByteKind::Instruction, "fallthrough should continue through NOP to RET");
     expect(bank.states[7].kind == msxdisa::ByteKind::ByteData, "orphaned header word half should become byte data");
 
     std::ostringstream assembly;
@@ -63,8 +63,8 @@ int main()
     expect(text.find("    DW\t\t0x4004") != std::string::npos,
         "header word should be emitted with an indented DW pseudo-op");
     expect(text.find("B00L4004::") != std::string::npos, "INIT label should include bank and address");
-    expect(text.find("JP\t\tB00L400A") != std::string::npos, "JP operand should use its generated label");
-    expect(text.find("B00L400A::") != std::string::npos, "JP target label should be emitted");
+    expect(text.find("JP\t\tB00L4010") != std::string::npos, "JP operand should use its generated label");
+    expect(text.find("B00L4010::") != std::string::npos, "JP target label should be emitted");
     expect(text.find("\n; 0x") == std::string::npos, "standalone address comments should not be emitted");
 
     std::vector<std::uint8_t> banked_rom(0x4000, 0x00);

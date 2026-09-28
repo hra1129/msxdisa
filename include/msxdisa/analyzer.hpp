@@ -41,6 +41,7 @@ struct AnalyzedBank {
 
 struct RomAnalysis {
     bool has_header = false;
+    std::size_t header_size = 0;
     MapperType mapper = MapperType::None;
     std::uint16_t origin = 0;
     std::uint16_t entry = 0;

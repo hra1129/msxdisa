@@ -142,6 +142,8 @@ void enqueue_target(RomAnalysis& analysis, std::size_t source_bank, std::uint16_
 {
     const auto target = locate_target(analysis, source_bank, address);
     if (!target) return;
+    // The ROM header is data, so references into it must not restart decoding there.
+    if (target->first == 0 && target->second < analysis.header_size) return;
     auto& bank = analysis.banks[target->first];
     bank.states[target->second].has_label = true;
     work.push_back({target->first, target->second});
@@ -196,6 +198,67 @@ void mark_header(AnalyzedBank& bank)
     }
 }
 
+// Length of a BIOS entry slot at offset: JP nn, optionally preceded by EI/DI.
+std::size_t entry_slot_length(const AnalyzedBank& bank, std::size_t offset)
+{
+    if (offset >= bank.bytes.size()) return 0;
+    const std::size_t prefix =
+        (bank.bytes[offset] == 0xFB || bank.bytes[offset] == 0xF3) ? 1 : 0;
+    const std::size_t jump = offset + prefix;
+    if (jump + 3 > bank.bytes.size() || bank.bytes[jump] != 0xC3) return 0;
+    return prefix + 3;
+}
+
+bool slot_is_unexamined(const AnalyzedBank& bank, std::size_t offset, std::size_t length)
+{
+    for (std::size_t byte = 0; byte < length; ++byte) {
+        if (bank.states[offset + byte].kind != ByteKind::Unexamined) return false;
+    }
+    return true;
+}
+
+// A run of entry slots padded with NOPs is a BIOS style entry table, even without callers.
+void scan_entry_tables(RomAnalysis& analysis, std::deque<WorkItem>& work)
+{
+    constexpr std::size_t minimum_entries = 3;
+    constexpr std::size_t maximum_padding = 5;
+    for (std::size_t bank_index = 0; bank_index < analysis.banks.size(); ++bank_index) {
+        auto& bank = analysis.banks[bank_index];
+        std::size_t offset = 0;
+        while (offset < bank.bytes.size()) {
+            if (entry_slot_length(bank, offset) == 0) {
+                ++offset;
+                continue;
+            }
+
+            std::vector<std::pair<std::size_t, std::size_t>> entries;
+            std::size_t cursor = offset;
+            for (std::size_t length = entry_slot_length(bank, cursor); length != 0;
+                 length = entry_slot_length(bank, cursor)) {
+                entries.emplace_back(cursor, length);
+                cursor += length;
+                std::size_t padding = 0;
+                while (padding < maximum_padding && cursor < bank.bytes.size() &&
+                       bank.bytes[cursor] == 0x00) {
+                    ++cursor;
+                    ++padding;
+                }
+            }
+
+            if (entries.size() >= minimum_entries) {
+                for (const auto& entry : entries) {
+                    if (!slot_is_unexamined(bank, entry.first, entry.second)) continue;
+                    bank.states[entry.first].has_label = true;
+                    work.push_back({bank_index, entry.first});
+                }
+                offset = cursor;
+            } else {
+                offset += 1;
+            }
+        }
+    }
+}
+
 void normalize_words(AnalyzedBank& bank)
 {
     for (std::size_t offset = 0; offset < bank.states.size(); ++offset) {
@@ -224,10 +287,14 @@ RomAnalysis analyze_rom(const std::vector<std::uint8_t>& rom, MapperType mapper,
 
     RomAnalysis analysis;
     analysis.mapper = mapper;
-    analysis.has_header = rom.size() >= 16 && rom[0] == 'A' && rom[1] == 'B';
+    // "AB" is the standard ROM header id, "CD" is used by the SUB-ROM.
+    const bool rom_header = rom.size() >= 16 && rom[0] == 'A' && rom[1] == 'B';
+    const bool sub_rom_header = rom.size() >= 16 && rom[0] == 'C' && rom[1] == 'D';
+    analysis.has_header = rom_header || sub_rom_header;
     analysis.origin = mapper == MapperType::None ? 0x0100 : 0x4000;
-    if (analysis.has_header) analysis.origin = 0x4000;
-    if (analysis.has_header && read_word(rom, 2) >= 0x8000) analysis.origin = 0x8000;
+    if (rom_header) analysis.origin = 0x4000;
+    if (rom_header && read_word(rom, 2) >= 0x8000) analysis.origin = 0x8000;
+    if (sub_rom_header) analysis.origin = 0x0000;
     if (origin_override) analysis.origin = *origin_override;
 
     const std::size_t bank_size = bank_size_for(mapper, rom.size());
@@ -278,7 +345,10 @@ RomAnalysis analyze_rom(const std::vector<std::uint8_t>& rom, MapperType mapper,
         }
     }
 
-    if (analysis.has_header && !analysis.banks.empty()) mark_header(analysis.banks[0]);
+    if (analysis.has_header && !analysis.banks.empty()) {
+        mark_header(analysis.banks[0]);
+        analysis.header_size = std::min<std::size_t>(16, analysis.banks[0].bytes.size());
+    }
 
     std::deque<WorkItem> work;
     bool entry_mapped = false;
@@ -286,13 +356,17 @@ RomAnalysis analyze_rom(const std::vector<std::uint8_t>& rom, MapperType mapper,
         auto& bank = analysis.banks[bank_index];
         if (analysis.entry >= bank.cpu_origin &&
             static_cast<std::size_t>(analysis.entry - bank.cpu_origin) < bank.bytes.size()) {
-            enqueue_target(analysis, bank_index, analysis.entry, work);
+            const std::size_t offset = static_cast<std::size_t>(analysis.entry - bank.cpu_origin);
+            bank.states[offset].has_label = true;
+            work.push_back({bank_index, offset});
             entry_mapped = true;
             break;
         }
     }
     if (!entry_mapped) throw std::runtime_error("entry address is outside all ROM banks");
 
+    explore_from(analysis, work);
+    scan_entry_tables(analysis, work);
     explore_from(analysis, work);
     for (std::size_t bank_index = 0; bank_index < analysis.banks.size(); ++bank_index) {
         auto& bank = analysis.banks[bank_index];
